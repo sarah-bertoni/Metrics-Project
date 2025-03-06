@@ -1,0 +1,374 @@
+---
+title: "Continuos treatment"
+autor: "Bertoni, Godfrin, Lim"
+date:  11 February 20125
+format:
+  pdf: 
+    fontsize: 9pt
+    mainfont: Garamond
+    sansfont: Garamond
+editor: visual
+output: 
+  html_document:
+    theme: cosmo
+    latex_engine: pdflatex
+    huxreg_options: "tabular={l|ccc}, tablewidth=0.1\\textwidth, tablefont=\\footnotesize"
+    fig_caption: true
+execute:
+  echo: false
+  warning: false
+---
+
+## Diff in Diff
+
+```{r}
+library(haven)
+library(readxl)
+library(tidyverse)
+library(kableExtra)
+Sys.setenv(RGL_USE_NULL = TRUE)
+
+library(wooldridge)
+library(DIDmultiplegtDYN)
+library(huxtable)
+```
+
+```{r}
+tariffs_JDE <- read_dta("C:/Users/sarah/OneDrive/Desktop/Università/Econometria/Project/TLIndonesia2015/tariffs_JDE.dta")
+
+panel_JDE <- read_dta("C:/Users/sarah/OneDrive/Desktop/Università/Econometria/Project/TLIndonesia2015/panel_JDE.dta")
+
+
+```
+
+### Replication study
+
+We show the estimation of the effect of banking deregulations on loans volume (data of Favara and Imbs) to showcase the methodology when there are stayers across multiple periods.
+
+```{r}
+repo <- "chaisemartinPackages/ApplicationData/main" 
+file <- "favara_imbs_did_multiplegt_dyn.dta"
+url <- paste("https://raw.githubusercontent.com", repo, file, sep = "/")
+favara_imbs <-  haven::read_dta(url)
+```
+
+```{r, fig.width=7, fig.height=3}
+
+results<-did_multiplegt_dyn(
+    df = favara_imbs,
+    outcome = "Dl_vloans_b",
+    group = "county",
+    time = "year",
+    treatment = "inter_bra",
+    effects = 8,
+    placebo = 3,
+    cluster = "state_n",
+    normalized = F,
+    same_switchers = TRUE,
+    effects_equal = TRUE
+)
+
+
+```
+
+```{r}
+summary(results)
+```
+
+## Indonesia dataset
+
+```{r}
+#data cleaning
+PNL_TrIn <- panel_JDE %>%
+  mutate(tarif_In_tr = as.numeric(tarif_inp_tri),
+         year = as.numeric(year),
+         distid = as.numeric(distid)) %>%
+    rename(TarIn = tarif_inp_tri) %>%
+  select("year", "distid", "TarIn","p0", "age1660",  'hwage_e41', 'hwage_e42', 'hwage_e43', 'hwage_e44', 'hwage', 'work_e43')%>%
+  drop_na() %>%
+  mutate(TarIn = round(TarIn, digits=0))
+
+#Won't display any graph as, well, too many districts. 
+
+ChangeTrIn <- PNL_TrIn %>%
+  group_by(distid) %>%
+  mutate(CPY_TrIn = case_when(
+    year == 1993 ~ 0,
+    year == 1996 ~ (TarIn[year == 1996] - TarIn[year == 1993]),
+    year == 1999 ~ (TarIn[year == 1999] - TarIn[year == 1996]),
+    year == 2002 ~ (TarIn[year == 2002] - TarIn[year == 1999]),
+    TRUE ~ NA_real_)) %>%
+  ungroup() %>%
+  mutate(CPY_TrIn = round(CPY_TrIn, digits=1))
+
+ChangeTrInp0_Wide <- ChangeTrIn %>%
+  select(distid, year, CPY_TrIn, TarIn, p0,  'hwage_e41', 'hwage_e42', 'hwage_e43', 'hwage_e44', 'hwage', 'work_e43') %>%
+  pivot_wider(
+    names_from = year,
+    values_from = c(CPY_TrIn, TarIn,p0),
+    names_glue = "{.value}_{year}")
+
+# Stayers ? 
+
+ChangeTrIn_Stay <- ChangeTrIn %>% 
+  mutate(Stayers = ifelse(year==1999 & CPY_TrIn==0, 1, 0))
+
+huxreg("Stayers"=lm(data=ChangeTrIn_Stay, formula= Stayers ~ 1)) %>%  set_caption('Percentage of Stayers Indonesian Dataset')
+
+
+model <-lm(data=ChangeTrIn_Stay, formula= Stayers ~ 1)
+names(model$coefficients)[1] = 'Stayers'
+model<- huxreg(" "=model,
+                  error_format = "({std.error})",
+                  error_pos = "below",
+                  statistics = c(N = "nobs"),
+                  note = "{stars}",
+                  align = "center") %>%
+  set_caption('Percentage of Stayers Indonesian Dataset')
+
+
+```
+
+```{r}
+# summary statistics
+sum_stats_decile <- panel_JDE %>%
+  select(distid, year, p0, tarif_inp_tri, hwage_e43)
+
+sum_stats_table_decile <- data.frame(
+  Statistic = c("Mean", "SD", "Min", "Max", "N Obs"),
+  sapply(sum_stats_decile, function(x) c(
+    mean = mean(x, na.rm = TRUE),
+    sd = sd(x, na.rm = TRUE),
+    min = min(x, na.rm = TRUE),
+    max = max(x, na.rm = TRUE),
+    n_obs = sum(!is.na(x))
+  ))
+)
+
+colnames(sum_stats_table_decile) <- c("Statistic", "District", "Year", "Poverty Headcount", "Input Tariff", "Wage (secondary education)" )
+rownames(sum_stats_table_decile) <- NULL
+
+
+kable(sum_stats_table_decile, caption = "Summary Statistics of Indonesian Dataset", digits = 2)%>%
+  kable_classic_2(full_width = F, html_font = "Garamound") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed")) %>%
+  row_spec(0, bold = T) 
+```
+
+#### Ouput: Poverty
+
+```{r}
+
+df_summary <- panel_JDE %>%
+  group_by(year, distid) %>%
+  summarise(mean_poverty = mean(p0, na.rm = TRUE))  
+
+
+# Density plot for years 1996 and 1999
+ggplot(data = df_summary[df_summary$year %in% c(1996, 1999),], aes(x = mean_poverty, fill = factor(year))) +
+  geom_density(alpha = 0.4) +  # Add density plot with transparency
+  scale_fill_manual(values = c("1996" = "#69b3a2", "1999" = "#404080")) +  # Color for each year
+  labs(x = "Mean Poverty", y = "Density", title = "Density Plot of Mean Poverty by Year") +
+  theme_minimal() +
+  ggtitle("Density of district Poverty in Indonesia for 1996 and 1999") +
+  theme(
+    plot.title = element_text(size = 10),     
+    plot.subtitle = element_text(size = 9),  
+    plot.caption = element_text(size = 9),
+    axis.title.x = element_text(size = 8),
+    axis.title.y = element_text(size = 8),
+    legend.text = element_text(size = 8),
+    legend.title = element_text(size = 8)
+  ) +
+  theme(legend.title = element_blank())  # Remove legend title if needed
+
+```
+
+We estimate the effect of input tariff on district level poverty for the 1996-1999 period.
+
+```{r, fig.width=7, fig.height=3}
+
+indonesia <-ChangeTrIn %>% filter(year==1996|year==1999|year==2002)
+
+did_multiplegt_dyn(
+    df = indonesia,
+    outcome = "p0",
+    group = "distid",
+    time = "year",
+    effects=1,
+    treatment = "TarIn",
+    normalized = T
+)
+
+
+```
+
+```{r}
+summary(did_multiplegt_dyn(
+    df = indonesia,
+    outcome = "p0",
+    group = "distid",
+    time = "year",
+    treatment = "TarIn",
+    normalized = TRUE,
+    graph_off = T
+))
+```
+
+We do not find statistical significant results.
+
+#### Output: Wage
+
+We estimate the effect of input tariff on district level wages for level of education. We find significant results only for wages of individuals holding secondary education.
+
+```{r}
+
+### WAGE SECONDARY EDUCATION ONLY SIGNIFICANT WAGE
+summary(did_multiplegt_dyn(
+    df = indonesia,
+    outcome = "hwage_e43",
+    group = "distid",
+    time = "year",
+    treatment = "TarIn",
+    normalized = TRUE,
+    graph_off = T
+))
+```
+
+```{r, fig.width=7, fig.height=3}
+
+did_multiplegt_dyn(
+    df = indonesia,
+    outcome = "hwage_e43",
+    group = "distid",
+    time = "year",
+    treatment = "TarIn",
+    normalized = TRUE,
+    graph_off = F
+)
+```
+
+#### Output: Employment
+
+We can also estimate the effect on employment, across different education levels; we do not find significant results.
+
+```{r, fig.width=7, fig.height=3}
+
+did_multiplegt_dyn(
+    df = indonesia,
+    outcome = "work_e43",
+    group = "distid",
+    time = "year",
+    treatment = "TarIn",
+    normalized = TRUE,
+    graph_off = F
+)
+```
+
+## Italian dataset
+
+### 
+
+```{r}
+##Data tidying
+##Prices
+Principali_dati_IT1_167_742_DF_DCSP_NIC2B2015_1_1_0_1_ <- read_excel("Principali dati (IT1,167_742_DF_DCSP_NIC2B2015_1,1.0) (1).xlsx")
+prices <- Principali_dati_IT1_167_742_DF_DCSP_NIC2B2015_1_1_0_1_
+prices <- prices %>% mutate(Region=prices$...3)
+prices<- prices[6:174,]
+prices<- prices %>% mutate ('Prices'= prices$...4)%>% mutate('Year'= prices$`Principali dati`)%>% select("Region", "Year", "Prices")
+
+new_rows <- data.frame(
+  Region = rep(unique(prices$Region), each = 1),
+  Year = rep(2015, length(unique(prices$Region))),
+  Prices = rep(100, length(unique(prices$Region)))
+)
+
+# Combine the new rows with the original dataframe
+prices <- rbind(prices, new_rows)
+
+```
+
+```{r}
+## Poverty
+Individui_poveri_regione_di_residenza_IT1_34_727_DF_DCCV_POVERTA_10_1_0_1_ <- read_excel("Individui poveri - regione di residenza (IT1,34_727_DF_DCCV_POVERTA_10,1.0) (1).xlsx")
+View(Individui_poveri_regione_di_residenza_IT1_34_727_DF_DCCV_POVERTA_10_1_0_1_)
+poverty <- Individui_poveri_regione_di_residenza_IT1_34_727_DF_DCCV_POVERTA_10_1_0_1_
+
+poverty <- poverty %>% mutate(Region=poverty$...2) %>% mutate(Poverty=poverty$...3) %>% mutate(Year=poverty$`Individui poveri - regione di residenza`)
+poverty<- poverty[5:201,]
+poverty<- poverty %>% select("Region", "Year", "Poverty")
+```
+
+```{r}
+
+prices$Region <- gsub("^\\[.*?\\]\\s*", "", prices$Region)
+prices$Region <- gsub("^\\s+", "", prices$Region)
+
+
+df<-  left_join(prices, poverty, by=c('Region', 'Year'))
+df<- na.omit(df) 
+```
+
+```{r}
+
+df$Year<-as.numeric(df$Year)
+df$Prices<- round(df$Prices,0)
+
+df <- df %>% filter(Region!='Molise'
+)
+
+
+```
+
+### Descriptive statistics
+
+```{r, fig.width=5, fig.height=3}
+
+df_summary <- df %>%
+  group_by(Year) %>%
+  summarise(mean_poverty = mean(Poverty, na.rm = TRUE))  # Use na.rm = TRUE to ignore NAs
+
+# Plot using ggplot
+ggplot(data = df_summary, aes(x = Year, y = mean_poverty)) +
+  geom_point() +
+  labs(x = "Year", y = "Mean Poverty", title = "Mean Poverty by Year") +
+  geom_area( fill="#69b3a2", alpha=0.4) +
+  geom_line(color="#69b3a2", linewidth=2) +
+  geom_point(size=3, color="#69b3a2") +
+  theme_minimal() +
+  ggtitle("Evolution of Regional Poverty in Italy")+theme(
+    plot.title = element_text(size = 8),     
+    plot.subtitle = element_text(size = 7),  
+    plot.caption = element_text(size = 7),
+     axis.title.x = element_text(size = 6),
+     axis.title.y = element_text(size=6),
+    legend.text = element_text(size = 6),
+        legend.title = element_text(size = 7)) 
+```
+
+### Diff in Diff
+
+```{r, fig.width=7, fig.height=3}
+
+df2<- df %>%  filter(Year>=2018)
+
+results<-did_multiplegt_dyn(
+    df = df2,
+    outcome = "Poverty",
+    group = "Region",
+    time = "Year",
+    treatment = "Prices",
+    effects = 2,
+    normalized = T,
+    graph_off = F
+)
+ 
+
+```
+
+```{r}
+summary(results)
+```
+
+We observe a positive and significant effect of the increase in prices on regional poverty in the period from 2018 to 2019, and negative but insignificant results for the 2019-2020 period.
