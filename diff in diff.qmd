@@ -25,12 +25,15 @@ execute:
 library(haven)
 library(readxl)
 library(tidyverse)
+library(dplyr)
 library(kableExtra)
 Sys.setenv(RGL_USE_NULL = TRUE)
 
 library(wooldridge)
 library(DIDmultiplegtDYN)
 library(huxtable)
+library(plm)
+library(Hmisc)
 ```
 
 ```{r}
@@ -41,40 +44,6 @@ panel_JDE <- read_dta("C:/Users/sarah/OneDrive/Desktop/Università/Econometria/P
 
 ```
 
-### Replication study
-
-We show the estimation of the effect of banking deregulations on loans volume (data of Favara and Imbs) to showcase the methodology when there are stayers across multiple periods.
-
-```{r}
-repo <- "chaisemartinPackages/ApplicationData/main" 
-file <- "favara_imbs_did_multiplegt_dyn.dta"
-url <- paste("https://raw.githubusercontent.com", repo, file, sep = "/")
-favara_imbs <-  haven::read_dta(url)
-```
-
-```{r, fig.width=7, fig.height=3}
-
-results<-did_multiplegt_dyn(
-    df = favara_imbs,
-    outcome = "Dl_vloans_b",
-    group = "county",
-    time = "year",
-    treatment = "inter_bra",
-    effects = 8,
-    placebo = 3,
-    cluster = "state_n",
-    normalized = F,
-    same_switchers = TRUE,
-    effects_equal = TRUE
-)
-
-
-```
-
-```{r}
-summary(results)
-```
-
 ## Indonesia dataset
 
 ```{r}
@@ -82,9 +51,10 @@ summary(results)
 PNL_TrIn <- panel_JDE %>%
   mutate(tarif_In_tr = as.numeric(tarif_inp_tri),
          year = as.numeric(year),
-         distid = as.numeric(distid)) %>%
-    rename(TarIn = tarif_inp_tri) %>%
-  select("year", "distid", "TarIn","p0", "age1660",  'hwage_e41', 'hwage_e42', 'hwage_e43', 'hwage_e44', 'hwage', 'work_e43')%>%
+         distid = as.numeric(distid),
+         prop=as.numeric(prop)) %>%
+    rename(TarIn = tarif_In_tr) %>%
+  select("year", "distid", "TarIn","p0", "age1660",  'hwage_e41', 'hwage_e42', 'hwage_e43', 'hwage_e44', 'hwage', 'work_e43', 'prop', 'p0', 'p1', 'p2')%>%
   drop_na() %>%
   mutate(TarIn = round(TarIn, digits=0))
 
@@ -98,8 +68,7 @@ ChangeTrIn <- PNL_TrIn %>%
     year == 1999 ~ (TarIn[year == 1999] - TarIn[year == 1996]),
     year == 2002 ~ (TarIn[year == 2002] - TarIn[year == 1999]),
     TRUE ~ NA_real_)) %>%
-  ungroup() %>%
-  mutate(CPY_TrIn = round(CPY_TrIn, digits=1))
+  ungroup() 
 
 ChangeTrInp0_Wide <- ChangeTrIn %>%
   select(distid, year, CPY_TrIn, TarIn, p0,  'hwage_e41', 'hwage_e42', 'hwage_e43', 'hwage_e44', 'hwage', 'work_e43') %>%
@@ -116,7 +85,7 @@ ChangeTrIn_Stay <- ChangeTrIn %>%
 huxreg("Stayers"=lm(data=ChangeTrIn_Stay, formula= Stayers ~ 1)) %>%  set_caption('Percentage of Stayers Indonesian Dataset')
 
 
-model <-lm(data=ChangeTrIn_Stay, formula= Stayers ~ 1)
+model <-lm(data=na.omit(ChangeTrIn_Stay), formula= Stayers ~ 1)
 names(model$coefficients)[1] = 'Stayers'
 model<- huxreg(" "=model,
                   error_format = "({std.error})",
@@ -131,12 +100,14 @@ model<- huxreg(" "=model,
 
 ```{r}
 # summary statistics
-sum_stats_decile <- panel_JDE %>%
-  select(distid, year, p0, tarif_inp_tri, hwage_e43)
+sum_stats_decile96 <- panel_JDE %>%
+  select( p0, tarif_inp_tri, hwage_e43) %>% filter(panel_JDE$year=='1996')
+sum_stats_decile99 <- panel_JDE %>%
+  select(p0, tarif_inp_tri, hwage_e43) %>% filter(panel_JDE$year=='1999')
 
-sum_stats_table_decile <- data.frame(
+sum_stats_table_decile96 <- data.frame(
   Statistic = c("Mean", "SD", "Min", "Max", "N Obs"),
-  sapply(sum_stats_decile, function(x) c(
+  sapply(sum_stats_decile96, function(x) c(
     mean = mean(x, na.rm = TRUE),
     sd = sd(x, na.rm = TRUE),
     min = min(x, na.rm = TRUE),
@@ -145,14 +116,37 @@ sum_stats_table_decile <- data.frame(
   ))
 )
 
-colnames(sum_stats_table_decile) <- c("Statistic", "District", "Year", "Poverty Headcount", "Input Tariff", "Wage (secondary education)" )
-rownames(sum_stats_table_decile) <- NULL
+sum_stats_table_decile99 <- data.frame(
+  Statistic = c("Mean", "SD", "Min", "Max", "N Obs"),
+  sapply(sum_stats_decile99, function(x) c(
+    mean = mean(x, na.rm = TRUE),
+    sd = sd(x, na.rm = TRUE),
+    min = min(x, na.rm = TRUE),
+    max = max(x, na.rm = TRUE),
+    n_obs = sum(!is.na(x))
+  ))
+)
 
 
-kable(sum_stats_table_decile, caption = "Summary Statistics of Indonesian Dataset", digits = 2)%>%
+colnames(sum_stats_table_decile96) <- c("Statistic", "Poverty Headcount", "Input Tariff", "Wage (2nd education)" )
+
+colnames(sum_stats_table_decile99) <- c("Statistic",  "Poverty Headcount", "Input Tariff", "Wage (2nd education)" )
+
+
+
+sum_stats_table_decile96 <- sum_stats_table_decile96 %>%  mutate(Year= "1996")
+sum_stats_table_decile99 <- sum_stats_table_decile99 %>%  mutate(Year= "1999")
+
+## Combine
+final_df <- rbind(sum_stats_table_decile96, sum_stats_table_decile99)
+rownames(final_df) <- NULL
+
+final_df %>% 
+select(-Year)%>% kable(caption = "Summary Statistics of Indonesian Dataset in 1996 and 1999", digits = 2) %>%
   kable_classic_2(full_width = F, html_font = "Garamound") %>%
-  kable_styling(bootstrap_options = c("striped", "hover", "condensed")) %>%
-  row_spec(0, bold = T) 
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))  %>%
+  row_spec(0, bold = T) %>% pack_rows("1996",1,5)%>%
+ pack_rows("1999",6,10) 
 ```
 
 #### Ouput: Poverty
@@ -186,33 +180,49 @@ ggplot(data = df_summary[df_summary$year %in% c(1996, 1999),], aes(x = mean_pove
 
 We estimate the effect of input tariff on district level poverty for the 1996-1999 period.
 
-```{r, fig.width=7, fig.height=3}
-
-indonesia <-ChangeTrIn %>% filter(year==1996|year==1999|year==2002)
-
-did_multiplegt_dyn(
-    df = indonesia,
-    outcome = "p0",
-    group = "distid",
-    time = "year",
-    effects=1,
-    treatment = "TarIn",
-    normalized = T
-)
+```{r}
 
 
+
+summary <- (did_multiplegt_stat(
+   df = PNL_TrIn,
+   Y = "p0",
+    ID = "distid",
+    Time = "year",
+     D = "TarIn",
+     order = 2,
+     estimator = c("waoss", "aoss"),
+     estimation_method = "dr",
+   placebo = T,
+    aoss_vs_waoss = TRUE,
+   twfe = 'same_sample'
+   
+ ))
+
+data <- as.data.frame(summary$results) %>%
+  filter(rownames(.) %in% c("AOSS", "WAOSS")) %>%
+  mutate(Variable = rownames(data))
+
+dataa <- data %>% pivot_longer(cols = c("table.Estimate", "table.SE"), names_to = "Metric", values_to = "Value") %>%
+mutate(
+Value = ifelse(Metric == "table.SE", paste0("(", round(Value, 5), ")"), round(Value, 5)), 
+Metric = ifelse(Metric == "table.Estimate", "Estimate", "SE")
+) %>%
+mutate("Estimator" = ifelse(Metric == "SE", "", Variable)) %>% 
+mutate("Lower Bound" = ifelse(Metric == "SE", "", round(table.LB.CI,5))) %>% 
+mutate("Upper Bound" = ifelse(Metric == "SE", "", round(table.UB.CI,5))) %>% 
+mutate("AS vs WAS pvalue" = ifelse(Metric == "SE", "", round(aoss_vs_waoss.pval.,5)
+	)) 
+
+dataa %>% 
+select(Estimator, Value, "Lower Bound", "Upper Bound"
+)%>% kable(caption= 'Poverty headcount') %>%
+  kable_classic_2(full_width = F, html_font = "Garamound") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))  %>%
+  row_spec(0, bold = T) %>%  footnote('There are 188 switcher and 71 stayers in the period from 1996 to 1999; The t-test of the difference between the WAS and the AS returns a pvalue of 0.06756; district level data')
 ```
 
-```{r}
-summary(did_multiplegt_dyn(
-    df = indonesia,
-    outcome = "p0",
-    group = "distid",
-    time = "year",
-    treatment = "TarIn",
-    normalized = TRUE,
-    graph_off = T
-))
+```         
 ```
 
 We do not find statistical significant results.
@@ -224,28 +234,44 @@ We estimate the effect of input tariff on district level wages for level of educ
 ```{r}
 
 ### WAGE SECONDARY EDUCATION ONLY SIGNIFICANT WAGE
-summary(did_multiplegt_dyn(
-    df = indonesia,
-    outcome = "hwage_e43",
-    group = "distid",
-    time = "year",
-    treatment = "TarIn",
-    normalized = TRUE,
-    graph_off = T
-))
-```
 
-```{r, fig.width=7, fig.height=3}
 
-did_multiplegt_dyn(
-    df = indonesia,
-    outcome = "hwage_e43",
-    group = "distid",
-    time = "year",
-    treatment = "TarIn",
-    normalized = TRUE,
-    graph_off = F
-)
+
+summary2 <- (did_multiplegt_stat(
+   df = PNL_TrIn,
+   Y = "hwage_e43",
+    ID = "distid",
+    Time = "year",
+     D = "TarIn",
+     order = 2,
+     estimator = c("waoss", "aoss"),
+     estimation_method = "dr",
+   placebo = T,
+    aoss_vs_waoss = TRUE,
+   twfe = 'same_sample'
+   
+ ))
+
+data <- as.data.frame(summary2$results) %>%
+  filter(rownames(.) %in% c("AOSS", "WAOSS")) %>%
+  mutate(Variable = rownames(data))
+
+dataa <- data %>% pivot_longer(cols = c("table.Estimate", "table.SE"), names_to = "Metric", values_to = "Estimate") %>%
+mutate(
+Estimate = ifelse(Metric == "table.SE", paste0("(", round(Estimate, 5), ")"), round(Estimate, 5)), 
+Metric = ifelse(Metric == "table.Estimate", "Estimate", "SE")
+) %>%
+mutate("Estimator" = ifelse(Metric == "SE", "", Variable)) %>% 
+mutate("Lower Bound" = ifelse(Metric == "SE", "", round(table.LB.CI,5))) %>% 
+mutate("Upper Bound" = ifelse(Metric == "SE", "", round(table.UB.CI,5))) %>% 
+mutate("AS vs WAS pvalue" = ifelse(Metric == "SE", "", round(aoss_vs_waoss.pval.,5)
+	)) 
+
+dataa %>% 
+select(Estimator, Estimate
+)%>% kable(caption= 'Log Hourly Wages - junior secondary education') %>%
+  kable_classic(full_width = F, html_font = "Garamound")   %>%
+  row_spec(0, bold = T) %>%  footnote('There are 188 switcher and 71 stayers in the period from 1996 to 1999; The t-test of the difference between the WAS and the AS returns a pvalue of 0.002793504; district level data') 
 ```
 
 #### Output: Employment
@@ -360,7 +386,7 @@ results<-did_multiplegt_dyn(
     time = "Year",
     treatment = "Prices",
     effects = 2,
-    normalized = T,
+    normalized = T, 
     graph_off = F
 )
  
