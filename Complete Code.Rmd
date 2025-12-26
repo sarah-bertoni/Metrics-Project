@@ -1,0 +1,495 @@
+---
+title: "Econometrics project"
+subtitle: "Code - DiD with continuous treatment - the effects of changes in trade tariffs on poverty in Indonesia"
+author: "Constance Godfrin & Sarah Bertoni"
+date: "2024 - 2025"
+output: pdf_document
+---
+
+
+```{r setup, include=FALSE}
+library(haven)
+library(tidyverse)
+library(stargazer)
+library(kableExtra)
+library(dplyr)
+library(sf)
+library(ggplot2)
+```
+
+# Variables : descriptive stats, map and figures for poverty, tariffs and stayers. 
+
+## Outcomes variables (poverty indicators) in Indonesia
+
+```{r}
+# Poverty indicators and other outcomes variables
+PNL <- read_dta("/Users/constancegodfrin/Desktop/Indo2015/panel_JDE.dta")
+
+# Tariffs 
+TRF <- read_dta("/Users/constancegodfrin/Desktop/Indo2015/tariffs_JDE.dta")
+```
+
+Details on poverty indicators that the dataset provides : 
+\begin{itemize}
+\item P0 : the poverty headcount ratio, i.e. the ratio of people living under the poverty line.
+\item P1 : the poverty gap, i.e. the aggregated income gap of the poor normalized by the total income needed to reach the poverty line
+\item P1 : the squared poverty gap, i.e. the depth of poverty, which is defined as the sum of squared individual deviations from the poverty line of those living below the poverty line, normalized by the squared value of the poverty line income
+\end{itemize}
+
+District-level socio-economic variables (poverty, education, employment) are derived from surveys like Susenas (household survey) and Sakernas (labor force survey). Poverty indicators are given by province (38, 27 at the time i.e. before 2000) and by discrit. We summarize by province.
+
+
+```{r}
+
+# P0 desciptive statistics by province
+PNL_P0 <- PNL %>%
+  mutate(p0 = as.numeric(p0),
+         year = as.numeric(year)) %>%
+  select("prop", "year", "distid", "p0") %>%
+  group_by(prop, year) %>%  
+  summarize(p0pro = mean(p0, na.rm = TRUE), .groups = "drop") %>%
+  pivot_wider(
+    names_from = year,        
+    values_from = c("p0pro"),
+    names_glue = "{year}") %>%
+  select(-"NA") 
+
+stargazer(PNL_P0,
+          type = "latex",               
+          summary = FALSE,             
+          title = "Average P0 by province",
+          digits = 2, 
+          rownames = FALSE,
+          header = FALSE)
+
+```
+
+## District-level tariff exposure
+
+The main difficulty is to compute the change in tariffs at the district level, given that tariffs changes are national. In order to do this, we use the same method used by Kis.
+
+Output tariffs of district $k$ in year t are computed by weighting the actual average import tariffs of each sector s by the sector's relative importance in the local economy, measured in an initial, pre-reform time period.
+
+The relative importance of a sector in a district economy is measured by its regional employment share, and hence the weights are given by the relative share of the employment of the output sector $s$ $(Q_{s,k,t} = 1990)$ in the total labor force of district $k$ $(Q_{k,t} = 1990)$, measured before the reform, in 1990.
+
+The exposure for a district $k$ in year $t$ is calculated as:
+
+$$
+\text{District Tariff Exposure}_{kt} = \sum_{s=1}^{S} \left( \frac{Q_{sk, 1990}}{Q_{k, 1990}} \cdot \text{Tariff}_{st} \right)
+$$
+
+Where:
+
+\begin{itemize}
+\item $Q_{sk, 1990}$: Number of workers in sector $s$ in district $k$ at the baseline year (1990).
+\item $Q_{k, 1990}$: Total number of workers in district $k$ in 1990.
+\item$Tariff_{st}$: National tariff for sector $s$ in year $t$.
+\end{itemize}
+
+The variables have already been computed by the authors and are in the PNL database. 
+
+```{r, results='asis'}
+
+# Attempt 1 of a graph representing the evolution of input tariff for some districts
+# ATTENTON : ROUNDING OF TARIFFS IS MADE IN THIS PART OF THE CODE
+
+PNL_TrIn <- PNL %>%
+  rename(TarIn = tarif_inp_tri) %>%  
+  mutate(
+    TarIn = as.numeric(TarIn),
+    year = as.numeric(year),
+    distid = as.numeric(distid)) %>%
+  select(prop, year, distid, TarIn, p0, p1, p2, hwage_e41, hwage_e42, hwage_e43, hwage_e44) %>%
+  drop_na() %>%
+  mutate(TarIn = round(TarIn, digits = 0))  
+
+# Feel free to change them :) 
+
+colors <- c("indianred", "#ADD8E8", "antiquewhite4", "palegreen4", "#FFD700")  
+
+# Random districts that I chose the represent the types of trends
+
+Graph_TrIN <- PNL_TrIn %>%
+  filter(distid %in% c(40, 116, 246, 137, 205)) 
+
+ggplot(data = Graph_TrIN, aes(x = year, y = TarIn, color = factor(distid))) +
+  geom_line() +
+  theme_classic() +
+  scale_color_manual(values = colors) +
+  scale_x_continuous(breaks = seq(min(TRF$year, na.rm = TRUE), max(TRF$year, na.rm = TRUE), by = 1)) +
+  geom_rect(aes(xmin = 1993, xmax = 1996, ymin = -Inf, ymax = Inf), fill = "grey", alpha = 0.05, inherit.aes = FALSE) +
+  geom_rect(aes(xmin = 1999, xmax = 2002, ymin = -Inf, ymax = Inf), fill = "grey", alpha = 0.05, inherit.aes = FALSE) +
+  geom_vline(xintercept = c(1993, 1996, 1999, 2002), color = "grey", linetype = "dashed") +
+  labs(x = "Year", y = "Tariffs on input", color = "District", 
+       title = "")
+
+ggsave("~/Desktop/Indo2015/tariffs_graph1.pdf")
+
+```
+
+
+## Share of stayers
+
+We rounded tariffs on inputs, and compute (display) the share of stayers, i.e. districts that didn't observed any changes in the face value of tariffs between 2 periods. The periods that we have are 1993-1996 | 1996 - 1999 | 1999 - 2002. 
+
+```{r}
+ChangeTrIn <- PNL_TrIn %>%
+  group_by(distid) %>%
+  mutate(CPY_TrIn = case_when(
+    year == 1993 ~ 0,
+    year == 1996 ~ (TarIn[year == 1996] - TarIn[year == 1993]),
+    year == 1999 ~ (TarIn[year == 1999] - TarIn[year == 1996]),
+    year == 2002 ~ (TarIn[year == 2002] - TarIn[year == 1999]),
+    TRUE ~ NA_real_)) %>%
+  ungroup() 
+
+ChangeTrIn_Stay <- ChangeTrIn %>% 
+  mutate(Stayers96 = ifelse(year==1996 & CPY_TrIn==0, 1, 0),
+    Stayers99 = ifelse(year==1999 & CPY_TrIn==0, 1, 0),
+    Stayers02 = ifelse(year==2002 & CPY_TrIn==0, 1, 0))
+
+# I used LM to have SE and more precises estimates
+# Be careful : share of stayers is computed for each year (subset) - a district can be a stayer for only 1, 2, or 3 periods. 
+
+Stayers96 <- lm(Stayers96~1, data=ChangeTrIn_Stay%>%filter(year==1996))
+Stayers99 <- lm(Stayers99~1, data=ChangeTrIn_Stay%>%filter(year==1999))
+Stayers02 <- lm(Stayers02~1, data=ChangeTrIn_Stay%>%filter(year==2002))
+
+stargazer(Stayers96,Stayers99,Stayers02,
+          type = "latex",               
+          summary = FALSE,             
+          title = "Share of stayers based on previous year for input tariffs",
+          rownames = FALSE,
+          header = FALSE)
+
+```
+
+We only observe 28% of stayers between 1996 and 1999 : we focus only on this period. 
+
+## Test map
+```{r}
+
+# I try the map. That's the only Indonesian-districts map that I found... some changes occured in 1996 so 
+# some districts might not be matching + imperfection in the database provided by Kis-Kartos (non-conventionnal names for the districts and provinces)
+# so I tried to correct by hand... not perfect, but seems close to the one in the article (that covers not only 1996-1999).
+# Include it or not ? 
+
+# The shape file that I found
+indo_sf <- st_read("/Users/constancegodfrin/Desktop/Indo2015/geo2_id1990/geo2_id1990.shp")
+
+province_mapping <- data.frame(
+  PARENT = c(011, 012, 013, 014, 015, 016, 017, 018, 
+             031, 032, 033, 034, 035, 051, 052, 053, 
+             061, 062, 063, 064, 071, 072, 073, 074, 
+             081, 094), prop = 1:26)
+
+indo_sf$PARENT <- as.numeric(indo_sf$PARENT) 
+
+indo_sf <- indo_sf %>%
+  left_join(province_mapping, by = "PARENT")
+
+# That's were I take the more risks... If you have different opinions, I am happy to here them
+# I reassigned by the hand the "number" of the district (IPUM1990)to the numbers that used Kis-Kartos (1:289). 
+# It is supposed to match, but we never perfectly know, as we don't have the proper name of the district in KK. 
+
+district_mapping <- data.frame(
+  IPUM1990 = unique(indo_sf$IPUM1990),  
+  distid = 1:length(unique(indo_sf$IPUM1990)))
+
+indo_sf <- indo_sf %>%
+  left_join(district_mapping, by = "IPUM1990")
+
+# Just want 1996-1999
+Change1999Prov <- ChangeTrIn %>%
+  filter(year==1999) 
+
+indo_sf_merged <- indo_sf %>%
+  left_join(Change1999Prov, by = "distid")
+
+ggplot(data = indo_sf_merged) +
+  geom_sf(aes(fill = CPY_TrIn), color = "black") +
+  scale_fill_viridis_c(option = "inferno", na.value = "white") +
+  theme_classic() +
+  theme(plot.margin = margin(t = 10, r = 10, b = 10, l = 10), 
+    plot.caption = element_text(hjust = 0.5, size = 10)) +
+  labs(title = "",
+    fill = "Change",
+    caption = "Source : Kis-Kartos 2015 Data, own elaboration")
+
+ggsave("/Users/constancegodfrin/Desktop/Indo2015/map1996.pdf")
+
+```
+
+
+
+# Parameters of interest (use of the package)
+
+## AOSS and WAOSS : the average of the slopes of switchers (weighted and not weithed)
+
+The targeted parameter is the average of the slopes of switchers : $$AS := E\biggl(\frac{Y_2(D_2)-Y_2(D_1)}{D_2-D_1}\bigg|S=1\biggr)$$. For switchers, it measures the effect of changing their treatment from its period-1 to its period-2 value, not of other changes of their treatment.
+
+According to DeChaisemrtin and D'Haultfœuille, this parameter can be useful as, under certain assumption, it can be considered as a lower/higher bound of the effect of increasing the treatment to even higher values than the ones reached in period 2 (direction can depend of the form of the treatment effect, i.e. convex or concave).
+
+To identify the AS, we compare switchers and stayers with the same period-1 treatment. This requires that there be no value of the period-one treatment $D_1$ such that only switchers have that value. We do have such districts (can be shown later). Under this assumption and PTA (and other assumptions that can be detailed later), the estimations of the parameter is :
+
+$$
+\hat{AS} = E\biggl(\frac{\Delta Y - E(\Delta Y |D_1, S=0)}{\Delta D}\bigg| S=1\biggr)
+$$ 
+More details about the estimation method are in the paper. It is possible to do it by hand. However, we use their package `did_multiplegt_stat` (Estimation of Difference-in-Difference (DID) Estimators for Treatments and Instruments Continuously Distributed at Every Period with Stayers). 
+
+## Attempt of doing it by hand
+
+However, I tried to reproduced the method they use for computing the AS : 
+
+1. Estimates $E(\Delta Y|D_1, S = 0)$ using a non-parametric regression of $\Delta Y_i$ on $D_{i,1}$ among stayers.
+
+```{r}
+switchers <- PTp0TrIn %>%
+   filter (Switcher_Status == "Switchers") %>%
+  mutate(Delta_Y =  mean(p0_1999 - p0_1996),
+         Delta_D = mean(TarIn_1999 - TarIn_1996))
+```
+
+For switchers, $\Delta Y = P0_{1999}-P0_{1996}$ and $\Delta D_i = D_{i,1999}-D_{i,1996}$.$\hat{E}(\Delta Y | D_1, S=0)$ is estimated through a regression. This regression predicts the relationship between baseline treatment value (in 1996) and the change in poverty rate, for stayers.
+
+```{r}
+stayers <- PTp0TrIn %>%
+  filter(Switcher_Status == "Stayers") %>%
+  mutate(Delta_Y = p0_1999 - p0_1996)
+regression_model <- lm(Delta_Y ~ TarIn_1996, data = stayers)
+```
+
+2. For each switcher, we use the regression model to predict the expected $\hat{\Delta Y}$, based on the regression of stayers.
+
+```{r}
+switchers <- switchers %>%  
+  mutate(Expected_Delta_Y = predict(regression_model, newdata = switchers))
+```
+
+3. We compute the estimator.
+
+```{r, results='asis'}
+AS_estimator <- switchers %>%
+  summarise(AS = mean((Delta_Y - Expected_Delta_Y) / Delta_D, na.rm = TRUE))
+
+stargazer(AS_estimator,
+          type = "latex",               
+          summary = FALSE,             
+          title = "AS estimator",
+          rownames = FALSE,
+          header = FALSE)
+```
+
+
+## Output variable : p0
+
+We estimate the two estimators of interest, showing the impact of input tariff changes on district level poverty for the 1996-1999 period.
+
+```{r}
+# I created a new database, for more readability. It automatically reduced the sample to 1996-1999, as they only identify this period with stayers. 
+# To obtain the package 'did_multiplegt_stat', simply run all the functions that I put on the Github (copy past from their Github) (2532 normally)
+
+Sys.setenv(RGL_USE_NULL = TRUE)
+library(DIDmultiplegtDYN)
+
+df <- PNL %>%
+  mutate(TarIn = as.numeric(tarif_inp_tri),
+                    TarOut = as.numeric(tarif_out_tr),
+         year = as.numeric(year),
+         distid = as.numeric(distid)) %>%
+  mutate(TarIn = round(TarIn, digits=0),
+         TarOut = round(TarOut, digits=0))%>%
+  filter(year > 1993 & year <2000)
+
+summary(did_multiplegt_stat(
+   df = df,
+   Y = "p0",
+    ID = "distid", #Our unit indentifier, district
+    Time = "year", # Our time variable
+     D = "TarIn", # Our treatment variable
+     estimator = c("waoss", "aoss"), 
+   placebo = T,  # We want to able the placebo test
+    aoss_vs_waoss = TRUE, # Automatically compare the AOSS and WAOSS estimators
+   twfe = 'same_sample')) # Use the same sample for TWFE estimator, not super necessary precision however
+
+# Make a better table
+
+```
+We do not find statistical significant results and placebo test doesn't run properly. 
+
+
+## Output variable: hourly wage for education level
+
+We estimate the effect of input tariff on district level wages for level of education. We find significant results only for wages of individuals holding secondary education.
+
+```{r}
+
+# Try for hwage_e41, 42, 43, 42
+# We need to select the ones we want to dislay
+
+summary(did_multiplegt_stat(
+   df = df,
+   Y = "hwage_e41",
+   ID = "distid",
+   Time = "year",
+   D = "TarIn",
+   estimator = c("waoss", "aoss"),
+   placebo = TRUE,
+   aoss_vs_waoss = TRUE,
+   twfe = 'same_sample'))
+
+summary(did_multiplegt_stat(
+   df = df,
+   Y = "hwage_e42",
+   ID = "distid",
+   Time = "year",
+   D = "TarIn",
+   estimator = c("waoss", "aoss"),
+   placebo = TRUE,
+   aoss_vs_waoss = TRUE,
+   twfe = 'same_sample'))
+
+summary(did_multiplegt_stat(
+   df = df,
+   Y = "hwage_e43",
+    ID = "distid",
+    Time = "year",
+     D = "TarIn",
+     estimator = c("waoss", "aoss"),
+   placebo = T,
+    aoss_vs_waoss = TRUE,
+   twfe = 'same_sample'))
+
+summary(did_multiplegt_stat(
+   df = df,
+   Y = "hwage_e44",
+    ID = "distid",
+    Time = "year",
+     D = "TarIn",
+     estimator = c("waoss", "aoss"),
+   placebo = T,
+    aoss_vs_waoss = TRUE,
+   twfe = 'same_sample'))
+```
+
+Only wage for secondary education (e43) is significant. 
+
+We can also estimate the effect on employment, across different education levels; we do not find significant results.
+
+```{r}
+summary(did_multiplegt_stat(
+   df = df,
+   Y = "work_e43",
+    ID = "distid",
+    Time = "year",
+     D = "TarIn",
+     estimator = c("waoss", "aoss"),
+   placebo = T,
+    aoss_vs_waoss = TRUE,
+   twfe = 'same_sample'))
+
+```
+
+
+
+# Parallel trend assumptions, attempts package + by hand
+
+## Formulation of the parallel trends assumption
+
+$D_t$ represents the treatment at period $t$, with $t = 1 \text{(1996)}$ and $t = 2 \text{(1999)}$. $S = 1$ identifies switchers (units with $D_1 \neq D_2$) and $S = 0$ identifies stayers (units with $D_1 = D_2$).
+
+For any $d \in D1\ U\ D2$,
+
+\begin{itemize}
+\item $Y_1(d)$ and $Y_2(d)$  denote the unit’s potential outcomes at periods 1 and 2 with treatment $d$, 
+\item $Y_1$ and $Y_2$ denote their observed outcomes at periods 1 and 2. 
+\end{itemize}
+
+We assume no anticipation effects, i.e. $Y_1(d)$ is not influenced by period-2 treatment $d$. We also assume no dynamic effects, i.e. $Y_2(d)$ depends solely on $d$, the treatment applied in period 2, and not on period-1 treatment.
+
+Formally, we assume that :
+
+$$
+\begin{aligned}
+\text{For all}\ d_1 \in D_1, E(\Delta Y (d_1)|D_1 = d_1, D_2) = E(\Delta Y (d_1)|D_1 = d_1)
+\end{aligned}
+$$ Applied to our study:
+
+$$
+\begin{aligned}
+\text{For all}\ d_{1996} \in D_{1996}, E(Y_{1999}(d_{1996}) - Y_{1996}(d_{1996})|S=0) = E(Y_{1999}(d_{1996}) - Y_{1996}(d_{1996})|S=1)
+\end{aligned}
+$$ The treated group (switcher districts) experiences a change in tariffs, while the control group (stayer districts) does not. The parallel trends assert therefore that absent the tariff change, the switchers and stayers would have experienced the same trend in poverty rates.
+
+If $E(Y_{1999}(d_{1996})|S=0)$, $E(Y_{1996}(d_{1996})|S=0)$ and $E(Y_{1996}(d_{1996})|S=1)$ are observed, $E(Y_{1999}(d_{1996})|S=1)$ is not.
+
+## What if we compare the averages ? 
+
+```{r eval=FALSE, include=FALSE}
+# DON'T USE !!
+
+# Just to visualize for p0 without making grouping Stayers and Switchers by level of tariffs
+# So wrong but helps to understand
+
+PTp0TrIn <- ChangeTrIn_Stay %>%
+  mutate(Switcher_Status = ifelse(Stayers99 == 1, "Stayers", "Switchers")) %>%
+  group_by(distid) %>%
+  mutate(Switcher_Status = ifelse(any(Switcher_Status == "Stayers" & year == 1999), "Stayers", Switcher_Status)) %>%
+  ungroup()
+
+Mean_Poverty_Trends <- PTp0TrIn %>%
+  group_by(Switcher_Status, year) %>%
+  summarise(Mean_Poverty = mean(p0, na.rm = TRUE))
+
+ggplot(Mean_Poverty_Trends, aes(x = year, y = Mean_Poverty, color = Switcher_Status, group = Switcher_Status)) +
+  geom_line(size = 1.2) +
+  geom_point(size = 3) +
+  labs(title = "Parallel trends assumption: poverty rates averages for Stayers vs. Switchers",
+    x = "Year",
+    y = "Mean Poverty Rate",
+    color = "Group") +
+  theme_classic() 
+```
+
+
+## As placebo fails, test by hand
+
+Placebo test in the package failed (Placebo option :the command can compute placebo estimators comparing the outcome evolution of switchers and stayers with the same baseline treatment before switchers' treatment changes). One reason could be the small amount of switchers, and the (little) size of the sample (too few switchers and stayers share the same 1996 tariff baseline)
+
+If the parallel trends assumption cannot be verified, we still can test if trends in the poverty rate prior to treatment (i.e., before 1996) were parallel across districts with different levels of tariff exposure.
+
+We can decline the analysis for each variable of interest.
+
+```{r, results='asis'}
+# Here, we control before treatment and compare switchers/stayers with the same 1996 tariff's values. 
+
+pre_treatment_data <- PTp0TrIn %>%
+  filter(year %in% c(1993, 1996))%>%
+  group_by(distid) %>%
+  mutate(TarIn96 = TarIn[year == 1996]) %>%
+  ungroup()
+
+placebo_test_p0 <- lm(p0 ~ Switcher_Status * TarIn96, data = pre_treatment_data)
+
+placebo_test_hwage_e43 <- lm(hwage_e43 ~ Switcher_Status * TarIn96, data = pre_treatment_data)
+
+stargazer(placebo_test_p0,
+          type = "latex",               
+          summary = FALSE,             
+          title = "Placebo test P0",
+          digits = 2, 
+          rownames = FALSE,
+          header = FALSE)
+
+stargazer(placebo_test_hwage_e43,
+          type = "latex",               
+          summary = FALSE,             
+          title = "Placebo test hourly wage cat. e43",
+          digits = 2, 
+          rownames = FALSE,
+          header = FALSE)
+```
+
+
+
+
